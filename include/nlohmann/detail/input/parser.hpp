@@ -15,6 +15,7 @@
 #include <utility> // move
 #include <vector> // vector
 
+#include <nlohmann/storm_utility.hpp>
 #include <nlohmann/detail/exceptions.hpp>
 #include <nlohmann/detail/input/input_adapters.hpp>
 #include <nlohmann/detail/input/json_sax.hpp>
@@ -265,7 +266,7 @@ class parser
                     {
                         const auto res = m_lexer.get_number_float();
 
-                        if (JSON_HEDLEY_UNLIKELY(!std::isfinite(res)))
+                        if (JSON_HEDLEY_UNLIKELY(!nlohmann::storm::is_finite(res)))
                         {
                             return sax->parse_error(m_lexer.get_position(),
                                                     m_lexer.get_token_string(),

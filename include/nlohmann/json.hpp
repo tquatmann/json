@@ -20,13 +20,14 @@
 
 #include <algorithm> // all_of, find, for_each
 #include <cstddef> // nullptr_t, ptrdiff_t, size_t
-#include <functional> // hash, less
+#include <functional> // hash, less, function
 #include <initializer_list> // initializer_list
 #ifndef JSON_NO_IO
     #include <iosfwd> // istream, ostream
 #endif  // JSON_NO_IO
 #include <iterator> // random_access_iterator_tag
 #include <memory> // unique_ptr
+#include <optional> // optional
 #include <string> // string, stoi, to_string
 #include <utility> // declval, forward, move, pair, swap
 #include <vector> // vector
@@ -60,6 +61,8 @@
 #include <nlohmann/detail/value_t.hpp>
 #include <nlohmann/json_fwd.hpp>
 #include <nlohmann/ordered_map.hpp>
+
+#include <nlohmann/storm_utility.hpp>
 
 #if defined(JSON_HAS_CPP_17)
     #if JSON_HAS_STATIC_RTTI
@@ -359,6 +362,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @brief a type for a number (floating-point)
     /// @sa https://json.nlohmann.me/api/basic_json/number_float_t/
     using number_float_t = NumberFloatType;
+    using number_float_storage_t = nlohmann::storm::storage_type<NumberFloatType>;
 
     /// @brief a type for a packed binary type
     /// @sa https://json.nlohmann.me/api/basic_json/binary_t/
@@ -436,8 +440,8 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         number_integer_t number_integer;
         /// number (unsigned integer)
         number_unsigned_t number_unsigned;
-        /// number (floating-point)
-        number_float_t number_float;
+        /// number (floating-point) (stored as a pointer iff the type is non-trivial)
+        number_float_storage_t number_float;
 
         /// default constructor (for null values)
         json_value() = default;
@@ -447,8 +451,19 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         json_value(number_integer_t v) noexcept : number_integer(v) {}
         /// constructor for numbers (unsigned)
         json_value(number_unsigned_t v) noexcept : number_unsigned(v) {}
-        /// constructor for numbers (floating-point)
-        json_value(number_float_t v) noexcept : number_float(v) {}
+        /// constructor for numbers (floating-point, trivial type case)
+        template<typename T = number_float_t>
+        json_value(number_float_t value, std::enable_if_t<nlohmann::storm::is_trivial<T>>* = 0) noexcept : number_float(value) {}
+
+        /// constructor for numbers (floating-point, non-trivial type case)
+        template<typename T = number_float_t>
+        json_value(number_float_t* value, std::enable_if_t < !nlohmann::storm::is_trivial<T >>* = 0) noexcept : number_float(create<number_float_t>(value)) {}
+
+        /// constructor for numbers (floating-point, rvalue non-trivial type case)
+        template<typename T = number_float_t>
+        json_value(number_float_t&& value, std::enable_if_t < !nlohmann::storm::is_trivial<T >>* = 0) noexcept
+            : number_float(create<number_float_t>(std::move(value))) {}
+
         /// constructor for empty values of a given type
         json_value(value_t t)
         {
@@ -498,7 +513,14 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
                 case value_t::number_float:
                 {
-                    number_float = static_cast<number_float_t>(0.0);
+                    if constexpr (nlohmann::storm::is_trivial<number_float_t>)
+                    {
+                        number_float = static_cast<number_float_t>(nlohmann::storm::zero<number_float_t>());
+                    }
+                    else
+                    {
+                        number_float = create<number_float_t>(nlohmann::storm::zero<number_float_t>());
+                    }
                     break;
                 }
 
@@ -562,6 +584,14 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             {
                 //not initialized (e.g. due to exception in the ctor)
                 return;
+            }
+            if constexpr (!nlohmann::storm::is_trivial<number_float_t>)
+            {
+                if (t == value_t::number_float && number_float == nullptr)
+                {
+                    //not initialized (e.g. due to exception in the ctor)
+                    return;
+                }
             }
             if (t == value_t::array || t == value_t::object)
             {
@@ -645,12 +675,20 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                     std::allocator_traits<decltype(alloc)>::deallocate(alloc, binary, 1);
                     break;
                 }
-
+                case value_t::number_float:
+                {
+                    if constexpr (!nlohmann::storm::is_trivial<number_float_t>)
+                    {
+                        AllocatorType<number_float_t> alloc;
+                        std::allocator_traits<decltype(alloc)>::destroy(alloc, number_float);
+                        std::allocator_traits<decltype(alloc)>::deallocate(alloc, number_float, 1);
+                    }
+                    break;
+                }
                 case value_t::null:
                 case value_t::boolean:
                 case value_t::number_integer:
                 case value_t::number_unsigned:
-                case value_t::number_float:
                 case value_t::discarded:
                 default:
                 {
@@ -685,6 +723,10 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         JSON_ASSERT(m_data.m_type != value_t::array || m_data.m_value.array != nullptr);
         JSON_ASSERT(m_data.m_type != value_t::string || m_data.m_value.string != nullptr);
         JSON_ASSERT(m_data.m_type != value_t::binary || m_data.m_value.binary != nullptr);
+        if constexpr (!nlohmann::storm::is_trivial<number_float_t>)
+        {
+            JSON_ASSERT(m_data.m_type != value_t::number_float || m_data.m_value.number_float != nullptr);
+        }
 
 #if JSON_DIAGNOSTICS
         JSON_TRY
@@ -863,7 +905,14 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                 JSONSerializer<other_boolean_t>::to_json(*this, val.template get<other_boolean_t>());
                 break;
             case value_t::number_float:
+                if constexpr (nlohmann::storm::is_trivial<number_float_t>)
+                {
                 JSONSerializer<other_number_float_t>::to_json(*this, val.template get<other_number_float_t>());
+                }
+                else
+                {
+                    JSONSerializer<other_number_float_t>::to_json(*this, val.template get_ref<const other_number_float_t&>());
+                }
                 break;
             case value_t::number_integer:
                 JSONSerializer<other_number_integer_t>::to_json(*this, val.template get<other_number_integer_t>());
@@ -1085,7 +1134,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
             case value_t::number_float:
             {
-                m_data.m_value.number_float = first.m_object->m_data.m_value.number_float;
+                m_data.m_value.number_float = nlohmann::storm::to_value(first.m_object->m_data.m_value.number_float);
                 break;
             }
 
@@ -1189,7 +1238,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
             case value_t::number_float:
             {
-                m_data.m_value = other.m_data.m_value.number_float;
+                m_data.m_value = nlohmann::storm::to_value(other.m_data.m_value.number_float);
                 break;
             }
 
@@ -1487,13 +1536,27 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// get a pointer to the value (floating-point number)
     number_float_t* get_impl_ptr(number_float_t* /*unused*/) noexcept
     {
+        if constexpr (nlohmann::storm::is_trivial<number_float_t>)
+    {
         return is_number_float() ? &m_data.m_value.number_float : nullptr;
+    }
+        else
+        {
+            return is_number_float() ? m_data.m_value.number_float : nullptr;
+        }
     }
 
     /// get a pointer to the value (floating-point number)
     constexpr const number_float_t* get_impl_ptr(const number_float_t* /*unused*/) const noexcept
     {
+        if constexpr (nlohmann::storm::is_trivial<number_float_t>)
+    {
         return is_number_float() ? &m_data.m_value.number_float : nullptr;
+    }
+        else
+        {
+            return is_number_float() ? m_data.m_value.number_float : nullptr;
+        }
     }
 
     /// get a pointer to the value (binary)
@@ -2464,6 +2527,16 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                     std::allocator_traits<decltype(alloc)>::deallocate(alloc, m_data.m_value.binary, 1);
                     m_data.m_value.binary = nullptr;
                 }
+                else if (is_number_float())
+                {
+                    if constexpr (!nlohmann::storm::is_trivial<number_float_t>)
+                    {
+                        AllocatorType<number_float_t> alloc;
+                        std::allocator_traits<decltype(alloc)>::destroy(alloc, m_data.m_value.number_float);
+                        std::allocator_traits<decltype(alloc)>::deallocate(alloc, m_data.m_value.number_float, 1);
+                        m_data.m_value.number_float = nullptr;
+                    }
+                }
 
                 m_data.m_type = value_t::null;
                 assert_invariant();
@@ -2535,7 +2608,16 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                     std::allocator_traits<decltype(alloc)>::deallocate(alloc, m_data.m_value.binary, 1);
                     m_data.m_value.binary = nullptr;
                 }
-
+                else if (is_number_float())
+                {
+                    if constexpr (!nlohmann::storm::is_trivial<number_float_t>)
+                    {
+                        AllocatorType<number_float_t> alloc;
+                        std::allocator_traits<decltype(alloc)>::destroy(alloc, m_data.m_value.number_float);
+                        std::allocator_traits<decltype(alloc)>::deallocate(alloc, m_data.m_value.number_float, 1);
+                        m_data.m_value.number_float = nullptr;
+                    }
+                }
                 m_data.m_type = value_t::null;
                 assert_invariant();
                 break;
@@ -3042,7 +3124,14 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
             case value_t::number_float:
             {
-                m_data.m_value.number_float = 0.0;
+                if constexpr (nlohmann::storm::is_trivial<number_float_t>)
+                {
+                    m_data.m_value.number_float = nlohmann::storm::zero<number_float_t>();
+                }
+                else
+                {
+                    *m_data.m_value.number_float = nlohmann::storm::zero<number_float_t>();
+                }
                 break;
             }
 
@@ -3536,6 +3625,29 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
     /// @brief exchanges the values
     /// @sa https://json.nlohmann.me/api/basic_json/swap/
+    void swap(number_float_t& other)  // NOLINT(bugprone-exception-escape,cppcoreguidelines-noexcept-swap,performance-noexcept-swap)
+    {
+        // swap only works for float numbers
+        if (JSON_HEDLEY_LIKELY(is_number_float()))
+        {
+            using std::swap;
+            if constexpr (nlohmann::storm::is_trivial<number_float_t>)
+            {
+                swap(m_data.m_value.number_float, other);
+            }
+            else
+            {
+                swap(*(m_data.m_value.number_float), other);
+            }
+        }
+        else
+        {
+            JSON_THROW(type_error::create(310, detail::concat("cannot use swap(number_float_t&) with ", type_name()), this));
+        }
+    }
+
+    /// @brief exchanges the values
+    /// @sa https://json.nlohmann.me/api/basic_json/swap/
     void swap(binary_t& other) // NOLINT(bugprone-exception-escape,cppcoreguidelines-noexcept-swap,performance-noexcept-swap)
     {
         // swap only works for strings
@@ -3607,7 +3719,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                 return (lhs.m_data.m_value.number_unsigned) op (rhs.m_data.m_value.number_unsigned);                   \
                 \
             case value_t::number_float:                                                                  \
-                return (lhs.m_data.m_value.number_float) op (rhs.m_data.m_value.number_float);                         \
+                return (nlohmann::storm::to_value(lhs.m_data.m_value.number_float))op nlohmann::storm::to_value((rhs.m_data.m_value.number_float));        \
                 \
             case value_t::binary:                                                                        \
                 return (*lhs.m_data.m_value.binary) op (*rhs.m_data.m_value.binary);                                   \
@@ -3619,19 +3731,19 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     }                                                                                                    \
     else if (lhs_type == value_t::number_integer && rhs_type == value_t::number_float)                   \
     {                                                                                                    \
-        return static_cast<number_float_t>(lhs.m_data.m_value.number_integer) op rhs.m_data.m_value.number_float;      \
+        return nlohmann::storm::convert<number_float_t>(lhs.m_data.m_value.number_integer) op nlohmann::storm::to_value(rhs.m_data.m_value.number_float);      \
     }                                                                                                    \
     else if (lhs_type == value_t::number_float && rhs_type == value_t::number_integer)                   \
     {                                                                                                    \
-        return lhs.m_data.m_value.number_float op static_cast<number_float_t>(rhs.m_data.m_value.number_integer);      \
+        return nlohmann::storm::to_value(lhs.m_data.m_value.number_float) op nlohmann::storm::convert<number_float_t>(rhs.m_data.m_value.number_integer);      \
     }                                                                                                    \
     else if (lhs_type == value_t::number_unsigned && rhs_type == value_t::number_float)                  \
     {                                                                                                    \
-        return static_cast<number_float_t>(lhs.m_data.m_value.number_unsigned) op rhs.m_data.m_value.number_float;     \
+        return nlohmann::storm::convert<number_float_t>(lhs.m_data.m_value.number_unsigned) op nlohmann::storm::to_value(rhs.m_data.m_value.number_float);     \
     }                                                                                                    \
     else if (lhs_type == value_t::number_float && rhs_type == value_t::number_unsigned)                  \
     {                                                                                                    \
-        return lhs.m_data.m_value.number_float op static_cast<number_float_t>(rhs.m_data.m_value.number_unsigned);     \
+        return nlohmann::storm::to_value(lhs.m_data.m_value.number_float) op nlohmann::storm::convert<number_float_t>(rhs.m_data.m_value.number_unsigned);     \
     }                                                                                                    \
     else if (lhs_type == value_t::number_unsigned && rhs_type == value_t::number_integer)                \
     {                                                                                                    \
@@ -3656,10 +3768,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     // an operation is computed as an odd number of inverses of others
     static bool compares_unordered(const_reference lhs, const_reference rhs, bool inverse = false) noexcept
     {
-        if ((lhs.is_number_float() && std::isnan(lhs.m_data.m_value.number_float) && rhs.is_number())
-                || (rhs.is_number_float() && std::isnan(rhs.m_data.m_value.number_float) && lhs.is_number()))
+        if constexpr (nlohmann::storm::supports_nan<number_float_t>)
         {
-            return true;
+            if ((lhs.is_number_float() && std::isnan(lhs.m_data.m_value.number_float) && rhs.is_number())
+                || (rhs.is_number_float() && std::isnan(rhs.m_data.m_value.number_float) && lhs.is_number()))
+            {
+                return true;
+            }
         }
 #if JSON_USE_LEGACY_DISCARDED_VALUE_COMPARISON
         return (lhs.is_discarded() || rhs.is_discarded()) && !inverse;
@@ -3728,7 +3843,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @brief comparison: 3-way
     /// @sa https://json.nlohmann.me/api/basic_json/operator_spaceship/
     template<typename ScalarType>
-    requires std::is_scalar_v<ScalarType>
+    requires nlohmann::storm::is_scalar<ScalarType><ScalarType>
     std::partial_ordering operator<=>(ScalarType rhs) const noexcept // *NOPAD*
     {
         return *this <=> basic_json(rhs); // *NOPAD*
@@ -3753,7 +3868,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @brief comparison: less than or equal
     /// @sa https://json.nlohmann.me/api/basic_json/operator_le/
     template<typename ScalarType>
-    requires std::is_scalar_v<ScalarType>
+    requires nlohmann::storm::is_scalar<ScalarType><ScalarType>
     bool operator<=(ScalarType rhs) const noexcept
     {
         return *this <= basic_json(rhs);
@@ -3774,7 +3889,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @brief comparison: greater than or equal
     /// @sa https://json.nlohmann.me/api/basic_json/operator_ge/
     template<typename ScalarType>
-    requires std::is_scalar_v<ScalarType>
+    requires nlohmann::storm::is_scalar<ScalarType><ScalarType>
     bool operator>=(ScalarType rhs) const noexcept
     {
         return *this >= basic_json(rhs);
@@ -3798,7 +3913,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @brief comparison: equal
     /// @sa https://json.nlohmann.me/api/basic_json/operator_eq/
     template<typename ScalarType, typename std::enable_if<
-                 std::is_scalar<ScalarType>::value, int>::type = 0>
+                 nlohmann::storm::is_scalar<ScalarType>, int>::type = 0>
     friend bool operator==(const_reference lhs, ScalarType rhs) noexcept
     {
         return lhs == basic_json(rhs);
@@ -3807,7 +3922,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @brief comparison: equal
     /// @sa https://json.nlohmann.me/api/basic_json/operator_eq/
     template<typename ScalarType, typename std::enable_if<
-                 std::is_scalar<ScalarType>::value, int>::type = 0>
+                 nlohmann::storm::is_scalar<ScalarType>, int>::type = 0>
     friend bool operator==(ScalarType lhs, const_reference rhs) noexcept
     {
         return basic_json(lhs) == rhs;
@@ -3827,7 +3942,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @brief comparison: not equal
     /// @sa https://json.nlohmann.me/api/basic_json/operator_ne/
     template<typename ScalarType, typename std::enable_if<
-                 std::is_scalar<ScalarType>::value, int>::type = 0>
+                 nlohmann::storm::is_scalar<ScalarType>, int>::type = 0>
     friend bool operator!=(const_reference lhs, ScalarType rhs) noexcept
     {
         return lhs != basic_json(rhs);
@@ -3836,7 +3951,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @brief comparison: not equal
     /// @sa https://json.nlohmann.me/api/basic_json/operator_ne/
     template<typename ScalarType, typename std::enable_if<
-                 std::is_scalar<ScalarType>::value, int>::type = 0>
+                 nlohmann::storm::is_scalar<ScalarType>, int>::type = 0>
     friend bool operator!=(ScalarType lhs, const_reference rhs) noexcept
     {
         return basic_json(lhs) != rhs;
@@ -3855,7 +3970,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @brief comparison: less than
     /// @sa https://json.nlohmann.me/api/basic_json/operator_lt/
     template<typename ScalarType, typename std::enable_if<
-                 std::is_scalar<ScalarType>::value, int>::type = 0>
+                 nlohmann::storm::is_scalar<ScalarType>, int>::type = 0>
     friend bool operator<(const_reference lhs, ScalarType rhs) noexcept
     {
         return lhs < basic_json(rhs);
@@ -3864,7 +3979,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @brief comparison: less than
     /// @sa https://json.nlohmann.me/api/basic_json/operator_lt/
     template<typename ScalarType, typename std::enable_if<
-                 std::is_scalar<ScalarType>::value, int>::type = 0>
+                 nlohmann::storm::is_scalar<ScalarType>, int>::type = 0>
     friend bool operator<(ScalarType lhs, const_reference rhs) noexcept
     {
         return basic_json(lhs) < rhs;
@@ -3884,7 +3999,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @brief comparison: less than or equal
     /// @sa https://json.nlohmann.me/api/basic_json/operator_le/
     template<typename ScalarType, typename std::enable_if<
-                 std::is_scalar<ScalarType>::value, int>::type = 0>
+                 nlohmann::storm::is_scalar<ScalarType>, int>::type = 0>
     friend bool operator<=(const_reference lhs, ScalarType rhs) noexcept
     {
         return lhs <= basic_json(rhs);
@@ -3893,7 +4008,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @brief comparison: less than or equal
     /// @sa https://json.nlohmann.me/api/basic_json/operator_le/
     template<typename ScalarType, typename std::enable_if<
-                 std::is_scalar<ScalarType>::value, int>::type = 0>
+                 nlohmann::storm::is_scalar<ScalarType>, int>::type = 0>
     friend bool operator<=(ScalarType lhs, const_reference rhs) noexcept
     {
         return basic_json(lhs) <= rhs;
@@ -3914,7 +4029,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @brief comparison: greater than
     /// @sa https://json.nlohmann.me/api/basic_json/operator_gt/
     template<typename ScalarType, typename std::enable_if<
-                 std::is_scalar<ScalarType>::value, int>::type = 0>
+                 nlohmann::storm::is_scalar<ScalarType>, int>::type = 0>
     friend bool operator>(const_reference lhs, ScalarType rhs) noexcept
     {
         return lhs > basic_json(rhs);
@@ -3923,7 +4038,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @brief comparison: greater than
     /// @sa https://json.nlohmann.me/api/basic_json/operator_gt/
     template<typename ScalarType, typename std::enable_if<
-                 std::is_scalar<ScalarType>::value, int>::type = 0>
+                 nlohmann::storm::is_scalar<ScalarType>, int>::type = 0>
     friend bool operator>(ScalarType lhs, const_reference rhs) noexcept
     {
         return basic_json(lhs) > rhs;
@@ -3943,7 +4058,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @brief comparison: greater than or equal
     /// @sa https://json.nlohmann.me/api/basic_json/operator_ge/
     template<typename ScalarType, typename std::enable_if<
-                 std::is_scalar<ScalarType>::value, int>::type = 0>
+                 nlohmann::storm::is_scalar<ScalarType>, int>::type = 0>
     friend bool operator>=(const_reference lhs, ScalarType rhs) noexcept
     {
         return lhs >= basic_json(rhs);
@@ -3952,7 +4067,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @brief comparison: greater than or equal
     /// @sa https://json.nlohmann.me/api/basic_json/operator_ge/
     template<typename ScalarType, typename std::enable_if<
-                 std::is_scalar<ScalarType>::value, int>::type = 0>
+                 nlohmann::storm::is_scalar<ScalarType>, int>::type = 0>
     friend bool operator>=(ScalarType lhs, const_reference rhs) noexcept
     {
         return basic_json(lhs) >= rhs;

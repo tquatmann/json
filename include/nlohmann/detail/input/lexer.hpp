@@ -1283,10 +1283,17 @@ scan_number_done:
 
         // this code is reached if we parse a floating-point number or if an
         // integer conversion above failed
+        if constexpr (nlohmann::storm::is_trivial<number_float_t>)
+        {
         strtof(value_float, token_buffer.data(), &endptr);
 
         // we checked the number format before
         JSON_ASSERT(endptr == token_buffer.data() + token_buffer.size());
+        }
+        else
+        {
+            value_float = nlohmann::storm::from_string<number_float_t>(token_buffer);
+        }
 
         return token_type::value_float;
     }

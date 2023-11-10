@@ -16,6 +16,7 @@
 #include <limits> // numeric_limits
 #include <type_traits> // conditional
 
+#include <nlohmann/storm_utility.hpp>
 #include <nlohmann/detail/macro_scope.hpp>
 
 NLOHMANN_JSON_NAMESPACE_BEGIN
@@ -188,7 +189,7 @@ boundaries.
 template<typename FloatType>
 boundaries compute_boundaries(FloatType value)
 {
-    JSON_ASSERT(std::isfinite(value));
+    JSON_ASSERT(nlohmann::storm::is_finite(value));
     JSON_ASSERT(value > 0);
 
     // Convert the IEEE representation into a diyfp.
@@ -890,7 +891,7 @@ void grisu2(char* buf, int& len, int& decimal_exponent, FloatType value)
     static_assert(diyfp::kPrecision >= std::numeric_limits<FloatType>::digits + 3,
                   "internal error: not enough precision");
 
-    JSON_ASSERT(std::isfinite(value));
+    JSON_ASSERT(nlohmann::storm::is_finite(value));
     JSON_ASSERT(value > 0);
 
     // If the neighbors (and boundaries) of 'value' are always computed for double-precision
@@ -1065,7 +1066,7 @@ JSON_HEDLEY_RETURNS_NON_NULL
 char* to_chars(char* first, const char* last, FloatType value)
 {
     static_cast<void>(last); // maybe unused - fix warning
-    JSON_ASSERT(std::isfinite(value));
+    JSON_ASSERT(nlohmann::storm::is_finite(value));
 
     // Use signbit(value) instead of (value < 0) since signbit works for -0.
     if (std::signbit(value))

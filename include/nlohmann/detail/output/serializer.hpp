@@ -30,6 +30,7 @@
 #include <nlohmann/detail/output/output_adapters.hpp>
 #include <nlohmann/detail/string_concat.hpp>
 #include <nlohmann/detail/value_t.hpp>
+#include <nlohmann/storm_utility.hpp>
 
 NLOHMANN_JSON_NAMESPACE_BEGIN
 namespace detail
@@ -352,7 +353,17 @@ class serializer
 
             case value_t::number_float:
             {
-                dump_float(val.m_data.m_value.number_float);
+                if constexpr (nlohmann::storm::is_exact<number_float_t>)
+                {
+                    auto x = nlohmann::storm::to_value(val.m_data.m_value.number_float);
+                    // dump x as double to make sure that the output is sane JSON (that other libraries can deal with)
+                    auto x_double = nlohmann::storm::convert<double>(x);
+                    dump_float(x_double);
+                }
+                else
+                {
+                    dump_float(nlohmann::storm::to_value(val.m_data.m_value.number_float));
+                }
                 return;
             }
 
@@ -796,10 +807,11 @@ class serializer
 
     @param[in] x  floating-point number to dump
     */
-    void dump_float(number_float_t x)
+    template<typename FloatType>
+    void dump_float(FloatType x)
     {
         // NaN / inf
-        if (!std::isfinite(x))
+        if (!nlohmann::storm::is_finite(x))
         {
             o->write_characters("null", 4);
             return;
@@ -810,14 +822,15 @@ class serializer
         // guaranteed to round-trip, using strtof and strtod, resp.
         //
         // NB: The test below works if <long double> == <double>.
-        static constexpr bool is_ieee_single_or_double
-            = (std::numeric_limits<number_float_t>::is_iec559 && std::numeric_limits<number_float_t>::digits == 24 && std::numeric_limits<number_float_t>::max_exponent == 128) ||
-              (std::numeric_limits<number_float_t>::is_iec559 && std::numeric_limits<number_float_t>::digits == 53 && std::numeric_limits<number_float_t>::max_exponent == 1024);
+        static constexpr bool is_ieee_single_or_double =
+            (std::numeric_limits<FloatType>::is_iec559 && std::numeric_limits<FloatType>::digits == 24 && std::numeric_limits<FloatType>::max_exponent == 128) ||
+            (std::numeric_limits<FloatType>::is_iec559 && std::numeric_limits<FloatType>::digits == 53 && std::numeric_limits<FloatType>::max_exponent == 1024);
 
         dump_float(x, std::integral_constant<bool, is_ieee_single_or_double>());
     }
 
-    void dump_float(number_float_t x, std::true_type /*is_ieee_single_or_double*/)
+    template<typename FloatType>
+    void dump_float(FloatType x, std::true_type /*is_ieee_single_or_double*/)
     {
         auto* begin = number_buffer.data();
         auto* end = ::nlohmann::detail::to_chars(begin, begin + number_buffer.size(), x);
@@ -825,10 +838,11 @@ class serializer
         o->write_characters(begin, static_cast<size_t>(end - begin));
     }
 
+    template<typename FloatType>
     void dump_float(number_float_t x, std::false_type /*is_ieee_single_or_double*/)
     {
         // get number of digits for a float -> text -> float round-trip
-        static constexpr auto d = std::numeric_limits<number_float_t>::max_digits10;
+        static constexpr auto d = std::numeric_limits<FloatType>::max_digits10;
 
         // the actual conversion
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,hicpp-vararg)

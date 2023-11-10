@@ -23,6 +23,7 @@
 #include <nlohmann/detail/meta/std_fs.hpp>
 #include <nlohmann/detail/meta/type_traits.hpp>
 #include <nlohmann/detail/value_t.hpp>
+#include <nlohmann/storm_utility.hpp>
 
 NLOHMANN_JSON_NAMESPACE_BEGIN
 namespace detail
@@ -113,11 +114,20 @@ template<>
 struct external_constructor<value_t::number_float>
 {
     template<typename BasicJsonType>
-    static void construct(BasicJsonType& j, typename BasicJsonType::number_float_t val) noexcept
+    static void construct(BasicJsonType& j, const typename BasicJsonType::number_float_t& val) noexcept
     {
         j.m_data.m_value.destroy(j.m_data.m_type);
         j.m_data.m_type = value_t::number_float;
         j.m_data.m_value = val;
+        j.assert_invariant();
+    }
+
+    template<typename BasicJsonType>
+    static void construct(BasicJsonType& j, typename BasicJsonType::number_float_t&& val) noexcept
+    {
+        j.m_data.m_value.destroy(j.m_data.m_type);
+        j.m_data.m_type = value_t::number_float;
+        j.m_data.m_value = std::move(val);
         j.assert_invariant();
     }
 };
@@ -294,10 +304,10 @@ inline void to_json(BasicJsonType& j, typename BasicJsonType::string_t&& s)
 }
 
 template<typename BasicJsonType, typename FloatType,
-         enable_if_t<std::is_floating_point<FloatType>::value, int> = 0>
+         enable_if_t<nlohmann::storm::is_floating_point<FloatType>, int> = 0>
 inline void to_json(BasicJsonType& j, FloatType val) noexcept
 {
-    external_constructor<value_t::number_float>::construct(j, static_cast<typename BasicJsonType::number_float_t>(val));
+    external_constructor<value_t::number_float>::construct(j, nlohmann::storm::convert<typename BasicJsonType::number_float_t>(val));
 }
 
 template<typename BasicJsonType, typename CompatibleNumberUnsignedType,
